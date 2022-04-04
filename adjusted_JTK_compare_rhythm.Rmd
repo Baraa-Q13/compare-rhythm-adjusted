@@ -1,0 +1,318 @@
+---
+title: "Compare_rhythms after JTK , with adjusting the mean "
+Author: Baraa Altaha
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+##### loading libraries 
+rm(list = ls())
+library(DODR)
+library(Matrix)
+library(stats)
+library(dplyr)
+library(statmod)
+library(compareRhythms)
+#working directory 
+setwd("Z:/adjustment for paper/final_adjusted_dodr_jtk_compare/final_check")  
+
+##### input file
+input_otu = "OTUsCombined.tab" 
+
+###### some parameter to adjust 
+Number_of_columns_meta_data = 1:3
+period=24
+rhythm_fdr = 0.05         
+compare_fdr = 0.05
+amp_cutoff = 0
+jtk_period = 8:8
+```
+
+```{r}  
+####################  No  change needed bellow this line ##########
+otu_combined <- read.table (file = input_otu, check.names = FALSE, header = TRUE, dec = ".", sep = "\t", row.names = 1, comment.char = "")
+source("JTK_CYCLEv3.1.R")
+meta_file <-  otu_combined[, Number_of_columns_meta_data]
+otu_file <- t(otu_combined[,- Number_of_columns_meta_data])
+expr = otu_file
+exp_design = meta_file
+
+### functions 
+compute_circ_params <- function(y, t, period) {
+
+  inphase <- cos(2 * pi * t / period)
+  outphase <- sin(2 * pi * t / period)
+
+  X <- stats::model.matrix(~inphase + outphase)
+
+  fit <- stats::lm.fit(X, t(y))
+
+  amps <- 2 * sqrt(base::colSums(fit$coefficients[-1, ]^2))
+
+  phases <- (atan2(fit$coefficients[3, ], fit$coefficients[2, ]) %% (2*pi))
+
+  return(base::cbind(amps = amps, phases = phases))
+
+}
+
+compute_model_params <- function(y, group_id, d=NULL, type="fit") {
+
+  if (type == "fit") {
+    fit <- limma::lmFit(y, d)
+    coeffs <- fit$coefficients
+  }
+  else if (type == "coef") {
+    coeffs <- y
+  }
+
+  if (any(base::grepl(paste0(group_id[1], "_"),
+                      colnames(coeffs)))) {
+    rhy_params <- coeffs[, base::paste(group_id[1],
+                                       c("inphase", "outphase"),
+                                       sep = "_")]
+    amps_A <- 2 * sqrt(base::rowSums(rhy_params^2))
+    phases_A <- base::atan2(rhy_params[, 2], rhy_params[, 1]) %% (2*pi)
+  } else {
+    amps_A <- 0
+    phases_A <- 0
+  }
+
+  if (any(base::grepl(paste0(group_id[2], "_"),
+                      colnames(coeffs)))) {
+    rhy_params <- coeffs[, base::paste(group_id[2],
+                                       c("inphase", "outphase"),
+                                       sep = "_")]
+    amps_B <- 2 * sqrt(base::rowSums(rhy_params^2))
+    phases_B <- base::atan2(rhy_params[, 2], rhy_params[, 1])  %% (2*pi)
+  } else {
+    amps_B <- 0
+    phases_B <- 0
+  }
+
+  if (all(base::is.element(c("inphase", "outphase"),
+                           colnames(coeffs)))) {
+    rhy_params <- coeffs[, c("inphase", "outphase")]
+    amps <- 2 * sqrt(base::rowSums(rhy_params^2))
+    phases <- base::atan2(rhy_params[, 2], rhy_params[, 1])  %% (2*pi)
+    model_params <- base::cbind(amps, phases, amps, phases)
+  } else {
+    model_params <- base::cbind(amps_A, phases_A, amps_B, phases_B)
+  }
+
+  colnames(model_params) <- base::paste(rep(group_id, each = 2),
+                                        c("amp", "phase"), sep = "_")
+
+  return(model_params)
+}
+
+categorize <- function(a, b, dr) {
+  if (a && !b && dr) {
+    category <- "loss"
+  } else if (!a && b && dr) {
+    category <- "gain"
+  } else if (a && b && dr) {
+    category <- "change"
+  } else {
+    category <- "same"
+  }
+  return(category)
+}
+
+#######data splitting 
+exp_design <- base::cbind(exp_design,    col_number =base::seq(base::nrow(exp_design)))
+
+  group_id <- base::unique(exp_design$group)    
+  assertthat::are_equal(length(group_id), 2)
+
+  exp_design_A <- exp_design[exp_design$group == group_id[1], ]
+
+exp_design_A <- exp_design_A[base::order(exp_design_A$time), ]
+
+  exp_design_B <- exp_design[exp_design$group == group_id[2], ]
+
+  exp_design_B <- exp_design_B[base::order(exp_design_B$time), ]
+
+  deltat_A <- min(diff(base::unique(exp_design_A$time)))
+  time_A <- base::seq(min(exp_design_A$time),
+                      max(exp_design_A$time),
+                      by = deltat_A)
+  
+   unique_times_A <- base::table(exp_design_A$time)
+
+  measure_sequence_A <- base::vapply(time_A,
+                                     function(t) {
+                                       ifelse(any(names(unique_times_A) == t),
+                                              unique_times_A[names(unique_times_A) == t],
+                                              0)
+                                     },
+                                     integer(1))
+  
+  ####
+  deltat_B <- min(diff(base::unique(exp_design_B$time)))
+
+  time_B <- base::seq(min(exp_design_B$time),
+                      max(exp_design_B$time),
+                      by = deltat_B)
+
+  unique_times_B <- base::table(exp_design_B$time)
+
+  measure_sequence_B <- base::vapply(time_B,
+                                     function(t) {
+                                       ifelse(any(names(unique_times_B) == t),
+                                              unique_times_B[names(unique_times_B) == t],
+                                              0)
+                                     },
+                                     integer(1))
+  
+  expr_A <- expr[, exp_design_A$col_number]
+  expr_B <- expr[, exp_design_B$col_number]  
+ expr_A1 <- expr_A
+ colnames(expr_A1) <- exp_design_A$time
+ expr_B1 <- expr_B
+ colnames(expr_B1) <- exp_design_B$time
+
+ #### comupte circadian parameter
+  circ_params_A <- compute_circ_params(expr_A, exp_design_A$time, period = period)
+
+  circ_params_B <- compute_circ_params(expr_B, exp_design_B$time, period = period)
+
+
+###################### JTK first set 
+Names <- expr_A1[,1]
+data <- expr_A1
+group.sizes <- measure_sequence_A
+jtkdist(length(group.sizes), group.sizes)
+periods <- jtk_period
+jtk.init(periods,3);
+
+cat("JTK analysis started on",date(),"\n")
+flush.console()
+
+st <- system.time({
+  res <- apply(data,1,function(z) {
+    jtkx(z)
+    c(JTK.ADJP,JTK.PERIOD,JTK.LAG,JTK.AMP)
+  })
+  res <- as.data.frame(t(res))
+  bhq <- p.adjust(unlist(res[,1]),"BH")
+  res <- cbind(bhq,res)
+  colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
+  results <- cbind(res,data)
+  results <- results[order(res$ADJ.P,-res$AMP),]
+})
+print(st)
+results1 <- results[order(row.names(results), decreasing = F),]
+column_to_calculate_average <- results1[,7:length(results1)]
+average <- rowMeans(column_to_calculate_average)
+JTK_results_expr_A<- cbind(results1, average)
+
+write.table(JTK_results_expr_A, paste( group_id[1], "_JTK_results", ".tab", sep = ""), sep = "\t", col.names = NA, quote = F)
+ 
+
+### JTK second set 
+
+Names_B <- expr_B1[,1]
+data_B <- expr_B1
+group.sizes.B <- measure_sequence_B
+jtkdist(length(group.sizes.B), group.sizes.B)
+periods <- jtk_period
+jtk.init(periods,3);
+
+cat("JTK analysis started on",date(),"\n")
+flush.console()
+
+st_B <- system.time({
+  res_B <- apply(data_B,1,function(z) {
+    jtkx(z)
+    c(JTK.ADJP,JTK.PERIOD,JTK.LAG,JTK.AMP)
+  })
+  res_B <- as.data.frame(t(res_B))
+  bhq_B <- p.adjust(unlist(res_B[,1]),"BH")
+  res_B <- cbind(bhq_B,res_B)
+  colnames(res_B) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
+  results_B <- cbind(res_B,data_B)
+  results_B <- results_B[order(res_B$ADJ.P,-res_B$AMP),]
+})
+print(st_B)
+results1_B <- results_B[order(row.names(results_B), decreasing = F),]
+column_to_calculate_average <- results1_B[,7:length(results1_B)]
+average_B <- rowMeans(column_to_calculate_average)
+JTK_results_expr_B<- cbind(results1_B, average_B)
+
+write.table(JTK_results_expr_B, paste( group_id[2], "_JTK_", ".tab", sep = ""), sep = "\t", col.names = NA, quote = F)
+
+#### rhythmi in either 
+test_rhythmic_in_eithre   <-  JTK_results_expr_A$ADJ.P < rhythm_fdr | JTK_results_expr_B$ADJ.P < rhythm_fdr
+  
+##### adjusting mean and data centering 
+erxp_A_mean <- as.vector(apply(X = expr_A, MARGIN = 1, FUN = mean))
+erxp_A_substract_mean <- sweep(expr_A,1, erxp_A_mean, "-")
+erxp_A_substract_mean <-   erxp_A_substract_mean[order(row.names(erxp_A_substract_mean), decreasing = F),] 
+erxp_A_substract_mean <-   erxp_A_substract_mean[test_rhythmic_in_eithre,]
+
+erxp_B_mean <- as.vector(apply(X = expr_B, MARGIN = 1, FUN = mean))
+erxp_B_substract_mean <- sweep(expr_B,1, erxp_B_mean, "-")
+
+erxp_B_substract_mean <-   erxp_B_substract_mean[order(row.names(erxp_B_substract_mean), decreasing = F),]
+
+erxp_B_substract_mean <-   erxp_B_substract_mean[test_rhythmic_in_eithre,]
+
+
+##### run Dodr 
+    dodr_results <- DODR::robustDODR(t(erxp_A_substract_mean),
+                                   t(erxp_B_substract_mean),
+                                   times1 = exp_design_A$time,
+                                   times2 = exp_design_B$time,
+                                   norm = F,
+                                   period = period)
+#####
+  dodr_results$adj_p_val <- stats::p.adjust(dodr_results$p.value, method = "BH")
+#write.table(dodr_results, paste("adjusted_DODR_results", ".tab", sep = ""), sep = "\t", col.names = NA, quote = F)
+#### final table 
+  results_ALL <- data.frame(id = rownames(erxp_A_substract_mean),
+                        rhythmic_in_A = JTK_results_expr_A$ADJ.P[test_rhythmic_in_eithre] < compare_fdr,
+                        rhythmic_in_B = JTK_results_expr_B$ADJ.P[test_rhythmic_in_eithre] < compare_fdr,
+                        diff_rhythmic = dodr_results$adj_p_val < compare_fdr,
+                        stringsAsFactors = FALSE)
+
+  results_ALL$category <- base::mapply(categorize,
+                                results_ALL$rhythmic_in_A,
+                                results_ALL$rhythmic_in_B,
+                                results_ALL$diff_rhythmic)
+  results_ALL <- results_ALL[, c(1, 5, 2, 3, 4)]
+
+  circ_params_A <- circ_params_A[order(row.names(circ_params_A), decreasing = F),]
+  
+  circ_params_A <- circ_params_A[test_rhythmic_in_eithre,]
+ 
+    circ_params_B <- circ_params_B[order(row.names(circ_params_B), decreasing = F),]   
+    
+   circ_params_B <- circ_params_B[test_rhythmic_in_eithre,] 
+
+##########################################
+   expand_results <- data.frame(
+      A_amp = circ_params_A[, "amps"],
+      A_phase = circ_params_A[, "phases"],
+      B_amp = circ_params_B[, "amps"],
+      B_phase = circ_params_B[, "phases"],
+      adj_p_val_A = JTK_results_expr_A$ADJ.P[test_rhythmic_in_eithre],
+      adj_p_val_B = JTK_results_expr_B$ADJ.P[test_rhythmic_in_eithre],
+      adj_p_val_dodr = dodr_results$adj_p_val
+    )
+    results_ALL <- base::cbind(results_ALL, expand_results)
+  
+
+  rownames(results_ALL) <- NULL
+  colnames(results_ALL) <- gsub("A", group_id[1], colnames(results_ALL))
+  colnames(results_ALL) <- gsub("B", group_id[2], colnames(results_ALL))
+
+
+write.table(results_ALL, paste("combined_JTK_adjusted_DODR_results", ".tab", sep = ""), sep = "\t", col.names = NA, quote = F)
+```
+
+
